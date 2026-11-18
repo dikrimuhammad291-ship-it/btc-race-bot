@@ -68,7 +68,10 @@ const SELL_SLIPPAGE_BPS = 250;
 /** One exponential moving average, seeded with the first close it sees. */
 class Ema {
   value: number | null = null;
-  constructor(private readonly span: number) {}
+  private readonly span: number;
+  constructor(span: number) {
+    this.span = span;
+  }
   push(close: number): void {
     if (this.value === null) {
       this.value = close;
@@ -86,7 +89,10 @@ class Rsi {
   private avgLoss: number | null = null;
   private prev: number | null = null;
   value: number | null = null;
-  constructor(private readonly span: number) {}
+  private readonly span: number;
+  constructor(span: number) {
+    this.span = span;
+  }
   push(close: number): void {
     if (this.prev === null) {
       this.prev = close;
@@ -125,7 +131,10 @@ class Atr {
   private avg: number | null = null;
   private prevClose: number | null = null;
   value: number | null = null;
-  constructor(private readonly span: number) {}
+  private readonly span: number;
+  constructor(span: number) {
+    this.span = span;
+  }
   push(high: number, low: number, close: number): void {
     let tr = high - low;
     if (this.prevClose !== null) {
