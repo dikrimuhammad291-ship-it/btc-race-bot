@@ -16,18 +16,27 @@
 //   - Breakout trigger: the close must be the highest close of the last 60
 //     bars, so entries happen on fresh strength, not in the middle of a
 //     drift.
+//   - Trend-strength confirmation: the long EMA must itself be rising —
+//     higher now than 60 bars ago by at least 0.1% — and the close must be
+//     above the close 12 bars ago. A flat long average means the market is
+//     drifting sideways, and a negative 12-bar return means the move is
+//     already rolling over; both keep the bot out.
 //   - Momentum confirmation: Wilder's RSI(14) between 52 and 78 — positive
 //     momentum, but not a parabolic spike — and the close no more than 2%
 //     above the mid EMA, so the bot does not chase an extended move.
 //   - Volatility-scaled sizing: the stake is the whole equity in calm
 //     markets and scales down as the 60-bar ATR rises, so a wild hour
 //     cannot put the full account on one trade.
-//   - Exits: a 1.5% hard stop under the entry cost, a 1% trailing stop
-//     under the highest close since entry once the trade is 1% in profit,
-//     a trend exit when the fast EMA crosses back under the mid EMA, and a
-//     momentum exit when RSI falls under 38. After an exit the bot waits 60
-//     bars before it may enter again, so a whipsaw does not flip it straight
-//     back in.
+//   - Exits: the bot holds through one-minute noise and lets the trend run.
+//     A 0.8% trailing stop under the highest close since entry, armed once
+//     the trade is 0.5% in profit, locks in gains when the move turns; a
+//     1% hard stop under the entry cost caps the loss on a trade that goes
+//     wrong from the start; and a dead-trade rule exits a position that is
+//     still underwater 120 bars after entry, so capital is not parked in a
+//     trade that goes nowhere. After an exit the bot waits 90 bars before
+//     it may enter again, so a whipsaw does not flip it straight back in.
+//     There is no fast trend-flip or RSI exit: on one-minute bars those
+//     signals flip on every pullback and chop a winning trend into losses.
 //   - No entries before 120 bars of history, so the indicators are real
 //     numbers before the first order is ever decided.
 //
@@ -49,18 +58,24 @@ const BREAKOUT_BARS = 60;
 
 // Entry gates.
 const MIN_BARS_BEFORE_ENTRY = 120;
-const COOLDOWN_BARS = 60;
+const COOLDOWN_BARS = 90;
 const RSI_ENTER_LOW = 52;
 const RSI_ENTER_HIGH = 78;
 const MAX_EXTENSION = 1.02;
 /** Minimum separation between stacked EMAs, as a fraction of price. */
 const STACK_SEPARATION = 0.001;
+/** The long EMA must rise by at least this fraction over SLOPE_BARS. */
+const SLOPE_BARS = 60;
+const SLOPE_MIN = 0.001;
+/** The close must beat the close this many bars ago (recent momentum). */
+const MOMENTUM_BARS = 12;
 
 // Exits.
-const RSI_EXIT = 38;
-const HARD_STOP = 0.985;
-const TRAIL_ARM = 1.01;
-const TRAIL = 0.99;
+const HARD_STOP = 0.99;
+const TRAIL_ARM = 1.005;
+const TRAIL = 0.992;
+/** Exit a position still underwater this many bars after entry. */
+const DEAD_TRADE_BARS = 120;
 
 // Sizing: stake fraction = clamp(45 / atrBps, 0.4, 1.0).
 const SIZE_NUMERATOR_BPS = 45;
@@ -167,10 +182,16 @@ const atr = new Atr(ATR_SPAN);
 
 /** The last BREAKOUT_BARS closes, oldest first, for the breakout check. */
 const recentCloses: number[] = [];
+/** The last SLOPE_BARS + 1 long-EMA values, oldest first, for the slope check. */
+const longEmaHistory: number[] = [];
+/** The last MOMENTUM_BARS + 1 closes, oldest first, for the momentum check. */
+const closeHistory: number[] = [];
 let barsSeen = 0;
 let priceScale = 5;
 /** Highest close since the current position opened (0 while flat). */
 let peakClose = 0;
+/** Seq of the batch where the current position was entered (-1e9 while flat). */
+let entrySeq = -1_000_000_000;
 /** Seq of the batch where the last exit was decided (-1e9 before any exit). */
 let lastExitSeq = -1_000_000_000;
 
@@ -221,6 +242,10 @@ await runBars({
       atr.push(toDollars(bar.h), toDollars(bar.l), c);
       recentCloses.push(c);
       if (recentCloses.length > BREAKOUT_BARS) recentCloses.shift();
+      longEmaHistory.push(long.value as number);
+      if (longEmaHistory.length > SLOPE_BARS + 1) longEmaHistory.shift();
+      closeHistory.push(c);
+      if (closeHistory.length > MOMENTUM_BARS + 1) closeHistory.shift();
       barsSeen++;
       close = c;
     }
@@ -234,11 +259,10 @@ await runBars({
       // Holding: track the peak close and check every exit.
       if (peakClose === 0 || close > peakClose) peakClose = close;
       const cost = entryPrice(state, held);
-      const trendDown = fast.value !== null && mid.value !== null && fast.value < mid.value;
-      const momentumGone = rsi.value !== null && rsi.value < RSI_EXIT;
       const stop = peakClose >= cost * TRAIL_ARM ? peakClose * TRAIL : cost * HARD_STOP;
       const stoppedOut = close <= stop;
-      if (trendDown || momentumGone || stoppedOut) {
+      const deadTrade = state.seq - entrySeq >= DEAD_TRADE_BARS && close < cost;
+      if (stoppedOut || deadTrade) {
         const sell: SellInput = { side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: SELL_SLIPPAGE_BPS };
         orders.push(sell);
         lastExitSeq = state.seq;
@@ -262,6 +286,11 @@ await runBars({
     const momentumOk = r >= RSI_ENTER_LOW && r <= RSI_ENTER_HIGH;
     if (!stacked || !aboveFast || !notExtended || !momentumOk) return [];
     if (!breakoutHigh(close)) return [];
+    if (longEmaHistory.length < SLOPE_BARS + 1) return [];
+    const risingLong = l > longEmaHistory[0] * (1 + SLOPE_MIN);
+    if (!risingLong) return [];
+    if (closeHistory.length < MOMENTUM_BARS + 1) return [];
+    if (close <= closeHistory[0]) return [];
 
     // Volatility-scaled stake: full equity in calm markets, down to 40%.
     const atrBps = (a / close) * 10_000;
@@ -279,6 +308,7 @@ await runBars({
       max_slippage_bps: BUY_SLIPPAGE_BPS,
     };
     orders.push(buy);
+    entrySeq = state.seq;
     return orders;
   },
 });
