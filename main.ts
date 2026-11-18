@@ -10,8 +10,10 @@
 //   - Regime filter: three EMAs of the closes (12 / 48 / 144 bars). An entry
 //     needs them stacked upward (fast above mid above long) with the close
 //     above the fast one, so the bot only buys into an established uptrend
-//     and sits in cash through downtrends.
-//   - Breakout trigger: the close must be the highest close of the last 24
+//     and sits in cash through downtrends. The stack must also be separated
+//     by at least 0.1% at each step, so a flat, choppy market where the
+//     averages bunch together never triggers an entry.
+//   - Breakout trigger: the close must be the highest close of the last 60
 //     bars, so entries happen on fresh strength, not in the middle of a
 //     drift.
 //   - Momentum confirmation: Wilder's RSI(14) between 52 and 78 — positive
@@ -20,12 +22,12 @@
 //   - Volatility-scaled sizing: the stake is the whole equity in calm
 //     markets and scales down as the 60-bar ATR rises, so a wild hour
 //     cannot put the full account on one trade.
-//   - Exits: a 1% hard stop under the entry cost, a 0.7% trailing stop
-//     under the highest close since entry once the trade is 0.7% in
-//     profit, a trend exit when the fast EMA crosses back under the mid
-//     EMA, and a momentum exit when RSI falls under 42. After an exit the
-//     bot waits 30 bars before it may enter again, so a whipsaw does not
-//     flip it straight back in.
+//   - Exits: a 1.5% hard stop under the entry cost, a 1% trailing stop
+//     under the highest close since entry once the trade is 1% in profit,
+//     a trend exit when the fast EMA crosses back under the mid EMA, and a
+//     momentum exit when RSI falls under 38. After an exit the bot waits 60
+//     bars before it may enter again, so a whipsaw does not flip it straight
+//     back in.
 //   - No entries before 120 bars of history, so the indicators are real
 //     numbers before the first order is ever decided.
 //
@@ -43,20 +45,22 @@ const MID_SPAN = 48;
 const LONG_SPAN = 144;
 const RSI_SPAN = 14;
 const ATR_SPAN = 60;
-const BREAKOUT_BARS = 24;
+const BREAKOUT_BARS = 60;
 
 // Entry gates.
 const MIN_BARS_BEFORE_ENTRY = 120;
-const COOLDOWN_BARS = 30;
+const COOLDOWN_BARS = 60;
 const RSI_ENTER_LOW = 52;
 const RSI_ENTER_HIGH = 78;
 const MAX_EXTENSION = 1.02;
+/** Minimum separation between stacked EMAs, as a fraction of price. */
+const STACK_SEPARATION = 0.001;
 
 // Exits.
-const RSI_EXIT = 42;
-const HARD_STOP = 0.99;
-const TRAIL_ARM = 1.007;
-const TRAIL = 0.993;
+const RSI_EXIT = 38;
+const HARD_STOP = 0.985;
+const TRAIL_ARM = 1.01;
+const TRAIL = 0.99;
 
 // Sizing: stake fraction = clamp(45 / atrBps, 0.4, 1.0).
 const SIZE_NUMERATOR_BPS = 45;
@@ -252,7 +256,7 @@ await runBars({
     const l = long.value as number;
     const r = rsi.value as number;
     const a = atr.value as number;
-    const stacked = f > m && m > l;
+    const stacked = f > m * (1 + STACK_SEPARATION) && m > l * (1 + STACK_SEPARATION);
     const aboveFast = close > f;
     const notExtended = close <= m * MAX_EXTENSION;
     const momentumOk = r >= RSI_ENTER_LOW && r <= RSI_ENTER_HIGH;
